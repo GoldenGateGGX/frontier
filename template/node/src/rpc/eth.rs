@@ -7,16 +7,17 @@ use sc_client_api::{
 	client::BlockchainEvents,
 };
 use sc_network::NetworkService;
+use sc_network_sync::SyncingService;
 use sc_rpc::SubscriptionTaskExecutor;
 use sc_transaction_pool::{ChainApi, Pool};
 use sc_transaction_pool_api::TransactionPool;
-use sp_api::ProvideRuntimeApi;
+use sp_api::{CallApiAt, ProvideRuntimeApi};
 use sp_block_builder::BlockBuilder as BlockBuilderApi;
 use sp_blockchain::{Error as BlockChainError, HeaderBackend, HeaderMetadata};
 use sp_runtime::traits::Block as BlockT;
 // Frontier
 use fc_db::Backend as FrontierBackend;
-pub use fc_rpc::{EthBlockDataCacheTask, OverrideHandle, StorageOverride};
+pub use fc_rpc::{EthBlockDataCacheTask, EthConfig, OverrideHandle, StorageOverride};
 pub use fc_rpc_core::types::{FeeHistoryCache, FeeHistoryCacheLimit, FilterPool};
 pub use fc_storage::overrides_handle;
 use fp_rpc::{ConvertTransaction, ConvertTransactionRuntimeApi, EthereumRuntimeRPCApi};
@@ -37,6 +38,8 @@ pub struct EthDeps<C, P, A: ChainApi, CT, B: BlockT> {
 	pub enable_dev_signer: bool,
 	/// Network service
 	pub network: Arc<NetworkService<B, B::Hash>>,
+	/// Chain syncing service
+	pub sync: Arc<SyncingService<B>>,
 	/// Frontier Backend.
 	pub frontier_backend: Arc<FrontierBackend<B>>,
 	/// Ethereum data access overrides.
@@ -66,6 +69,7 @@ impl<C, P, A: ChainApi, CT: Clone, B: BlockT> Clone for EthDeps<C, P, A, CT, B> 
 			is_authority: self.is_authority,
 			enable_dev_signer: self.enable_dev_signer,
 			network: self.network.clone(),
+			sync: self.sync.clone(),
 			frontier_backend: self.frontier_backend.clone(),
 			overrides: self.overrides.clone(),
 			block_data_cache: self.block_data_cache.clone(),
@@ -79,14 +83,19 @@ impl<C, P, A: ChainApi, CT: Clone, B: BlockT> Clone for EthDeps<C, P, A, CT, B> 
 }
 
 /// Instantiate Ethereum-compatible RPC extensions.
-pub fn create_eth<C, BE, P, A, CT, B>(
+pub fn create_eth<C, BE, P, A, CT, B, EC: EthConfig<B, C>>(
 	mut io: RpcModule<()>,
 	deps: EthDeps<C, P, A, CT, B>,
 	subscription_task_executor: SubscriptionTaskExecutor,
+	pubsub_notification_sinks: Arc<
+		fc_mapping_sync::EthereumBlockNotificationSinks<
+			fc_mapping_sync::EthereumBlockNotification<B>,
+		>,
+	>,
 ) -> Result<RpcModule<()>, Box<dyn std::error::Error + Send + Sync>>
 where
 	B: BlockT,
-	C: ProvideRuntimeApi<B>,
+	C: CallApiAt<B> + ProvideRuntimeApi<B>,
 	C::Api: BlockBuilderApi<B> + EthereumRuntimeRPCApi<B> + ConvertTransactionRuntimeApi<B>,
 	C: BlockchainEvents<B> + 'static,
 	C: HeaderBackend<B> + HeaderMetadata<B, Error = BlockChainError> + StorageProvider<B, BE>,
@@ -108,6 +117,7 @@ where
 		is_authority,
 		enable_dev_signer,
 		network,
+		sync,
 		frontier_backend,
 		overrides,
 		block_data_cache,
@@ -129,7 +139,7 @@ where
 			pool.clone(),
 			graph,
 			converter,
-			network.clone(),
+			sync.clone(),
 			vec![],
 			overrides.clone(),
 			frontier_backend.clone(),
@@ -139,6 +149,7 @@ where
 			fee_history_cache_limit,
 			execute_gas_limit_multiplier,
 		)
+		.replace_config::<EC>()
 		.into_rpc(),
 	)?;
 
@@ -160,9 +171,10 @@ where
 		EthPubSub::new(
 			pool,
 			client.clone(),
-			network.clone(),
+			sync,
 			subscription_task_executor,
 			overrides,
+			pubsub_notification_sinks,
 		)
 		.into_rpc(),
 	)?;
